@@ -73,3 +73,7 @@ per-test selection off.
 Selection is as good as the recorded runs: a branch a test reaches only under
 some timing may be missing from the map. Run the full suite before delivery and
 in CI.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
