@@ -111,8 +111,9 @@ const guide = `## Running tests
   ` + "`go test -run '^TestName$' ./pkg`" + `.
 - Without a coverage map gotia selects whole packages (changed packages and their
   dependents). ` + "`go tool gotia record`" + ` (about a minute) records which functions each
-  test runs, so later runs select single tests. Re-record after pulling or a
-  large refactor; a stale map stays correct but selects more.
+  test runs, so later runs select single tests. Re-record after pulling: it
+  only re-runs the tests the new commits affect. A stale map stays correct
+  but selects more.
 - "no recorded test runs X" means no test executes a function you changed:
   add one if the change matters.
 - Run the full suite (` + "`go test ./...`" + `) before delivery; CI runs it too.

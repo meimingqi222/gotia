@@ -96,14 +96,15 @@ func cmdRecord(args []string) error {
 	own, buildFlags := splitArgs(args)
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
 	mapFlag := fs.String("map", "", "map file (default: inside .git, or $GOTIA_MAP)")
+	full := fs.Bool("full", false, "record every test, even when the map could be updated incrementally")
 	timeout := fs.Duration("timeout", 2*time.Minute, "limit for each test")
 	workers := fs.Int("j", runtime.NumCPU(), "tests run at once")
+	ignore := fs.String("ignore", envOr("GOTIA_IGNORE", defaultIgnore), "comma-separated globs of non-Go files that no test reads (also $GOTIA_IGNORE)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: gotia record [flags] [-- go test build flags, such as -tags]\n\nRuns every test of HEAD alone, with coverage, in a temporary checkout and\nrecords which functions each one executed. Uncommitted changes are not recorded.")
+		fmt.Fprintln(os.Stderr, "usage: gotia record [flags] [-- go test build flags, such as -tags]\n\nRecords which functions each test of HEAD executes, running each test alone\nwith coverage in a temporary checkout. With a usable map it re-records only the\ntests that the commits since the map's commit can affect, and keeps the rest.\nUncommitted changes are not recorded.")
 		fs.PrintDefaults()
 	}
 	fs.Parse(own)
-	start := time.Now()
 	m, err := loadModule(".")
 	if err != nil {
 		return err
@@ -114,33 +115,168 @@ func cmdRecord(args []string) error {
 			return err
 		}
 	}
+	_, err = record(m, recordOptions{file: file, full: *full, timeout: *timeout, workers: *workers,
+		buildFlags: buildFlags, ignore: splitList(*ignore)})
+	return err
+}
+
+type recordOptions struct {
+	file       string
+	full       bool
+	timeout    time.Duration
+	workers    int
+	buildFlags []string
+	ignore     []string
+}
+
+type recordStats struct {
+	ran, kept int
+}
+
+// scope is what an incremental record runs again: every test of a package in
+// whole, or the named tests. Tests outside it keep their recorded functions.
+type scope struct {
+	whole   map[string]bool            // package dir
+	tests   map[string]map[string]bool // package dir → test names
+	effects []string
+}
+
+func (sc *scope) rerun(rel, name string) bool {
+	return sc == nil || sc.whole[rel] || sc.tests[rel][name]
+}
+
+// incrementalScope selects the tests the commits from old.Base to the
+// checkout can affect, the same way gotia test selects them for a change.
+// A test outside it ran only functions that did not change, so it still runs
+// the same functions. It returns nil and the reason when every test must run.
+func incrementalScope(wm *module, old *coverMap, ignore []string) (*scope, string) {
+	files, err := wm.changedFiles(old.Base)
+	if err != nil {
+		return nil, err.Error()
+	}
+	p := newPlanner(wm, old, old.Base, ignore)
+	sc := &scope{whole: map[string]bool{}, tests: map[string]map[string]bool{}}
+	for _, rel := range files {
+		dir := path.Dir(rel)
+		current, err := os.ReadFile(filepath.Join(wm.root, filepath.FromSlash(rel)))
+		if errors.Is(err, os.ErrNotExist) && path.Ext(rel) == ".go" && wm.byDir[dir] == nil {
+			// The package is gone; its tests leave the map, and the packages
+			// that used it changed too.
+			p.effect("%s: its package was removed", rel)
+			continue
+		}
+		if pkg := wm.byDir[dir]; pkg != nil && strings.HasSuffix(rel, "_test.go") && gotiaDirectives(p.before(rel)) != gotiaDirectives(current) {
+			sc.whole[pkg.rel] = true
+			p.effect("%s: a //gotia: directive changed → package %s", rel, pkg.rel)
+		}
+		p.file(rel)
+	}
+	p.finish(false)
+	if p.all {
+		for _, e := range p.effects {
+			if strings.HasSuffix(e, "every package") || strings.Contains(e, "every package (") {
+				return nil, e
+			}
+		}
+		return nil, "a change affects every package"
+	}
+	for ip := range p.whole {
+		sc.whole[wm.byPath[ip].rel] = true
+	}
+	for ip, names := range p.tests {
+		if rel := wm.byPath[ip].rel; !sc.whole[rel] {
+			sc.tests[rel] = names
+		}
+	}
+	sc.effects = p.effects
+	return sc, ""
+}
+
+func gotiaDirectives(src []byte) string {
+	var b strings.Builder
+	for _, line := range strings.Split(string(src), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "//gotia:") {
+			b.WriteString(line + "\n")
+		}
+	}
+	return b.String()
+}
+
+func record(m *module, o recordOptions) (recordStats, error) {
+	var stats recordStats
+	start := time.Now()
 	head, err := output(m.root, "git", "rev-parse", "HEAD")
 	if err != nil {
-		return err
+		return stats, err
 	}
 	prefix, err := output(m.root, "git", "rev-parse", "--show-prefix")
 	if err != nil {
-		return err
+		return stats, err
+	}
+	var old *coverMap
+	if !o.full {
+		old, _ = readMap(m, o.file)
+		if old != nil && old.Base == head {
+			note("the map is already at %.7s; nothing to record (-full records every test again)", head)
+			return stats, nil
+		}
 	}
 	tmp, err := os.MkdirTemp("", "gotia-record-")
 	if err != nil {
-		return err
+		return stats, err
 	}
 	defer os.RemoveAll(tmp)
 	src := filepath.Join(tmp, "src")
 	if _, err := output(m.root, "git", "worktree", "add", "--detach", src, head); err != nil {
-		return err
+		return stats, err
 	}
 	defer func() {
 		_, _ = output(m.root, "git", "worktree", "remove", "--force", src)
 	}()
 	wm, err := loadModule(filepath.Join(src, filepath.FromSlash(prefix)))
 	if err != nil {
-		return err
+		return stats, err
+	}
+	var sc *scope
+	switch {
+	case old != nil:
+		var why string
+		if sc, why = incrementalScope(wm, old, o.ignore); sc == nil {
+			note("recording every test: %s", why)
+			old = nil
+		} else {
+			note("updating the map from %.7s to %.7s", old.Base, head)
+			for _, e := range sc.effects {
+				note("%s", e)
+			}
+		}
+	case !o.full:
+		note("no usable map; recording every test")
 	}
 
 	c := &coverMap{Version: mapVersion, Base: head, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		GoVersion: wm.goVersion(), Packages: map[string]int{}, Funcs: map[string][]int{}}
+	// Tests kept from the old map, by their index there.
+	oldIndex, oldByPkg, oldAlways := map[string]int{}, map[string][]int{}, map[int]bool{}
+	oldToNew := map[int]int{}
+	if old != nil {
+		for i, t := range old.Tests {
+			rel, _ := old.test(i)
+			oldIndex[t] = i
+			oldByPkg[rel] = append(oldByPkg[rel], i)
+		}
+		for _, i := range old.Always {
+			oldAlways[i] = true
+		}
+	}
+	keep := func(i int) {
+		oldToNew[i] = len(c.Tests)
+		if oldAlways[i] {
+			c.Always = append(c.Always, len(c.Tests))
+		}
+		c.Tests = append(c.Tests, old.Tests[i])
+	}
+
 	type job struct {
 		pkg   *goPackage
 		bin   string
@@ -155,52 +291,53 @@ func cmdRecord(args []string) error {
 		always map[string]bool
 		err    error
 	}
-	var candidates []*goPackage
+	var builds []built
 	for _, pkg := range wm.packages {
-		if len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) > 0 {
-			candidates = append(candidates, pkg)
+		if len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) == 0 {
+			continue
+		}
+		whole, always, err := testDirectives(pkg)
+		switch {
+		case err != nil:
+			return stats, err
+		case whole:
+			skipped = append(skipped, pkg.rel)
+		case sc == nil || sc.whole[pkg.rel] || len(sc.tests[pkg.rel]) > 0 || old.Packages[pkg.rel] == 0:
+			builds = append(builds, built{pkg: pkg, always: always})
+		default:
+			for _, i := range oldByPkg[pkg.rel] {
+				keep(i)
+			}
+			c.Packages[pkg.rel] = len(oldByPkg[pkg.rel])
 		}
 	}
-	builds := make([]built, len(candidates))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, max(1, runtime.NumCPU()/2))
-	for i, pkg := range candidates {
+	for i := range builds {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			b := built{pkg: pkg}
-			whole, always, err := testDirectives(pkg)
-			if err != nil || whole {
-				b.err = err
-				builds[i] = b
-				return
-			}
-			b.always = always
+			b := &builds[i]
 			b.bin = filepath.Join(tmp, fmt.Sprintf("p%d.test", i))
 			if runtime.GOOS == "windows" {
 				b.bin += ".exe"
 			}
-			args := append([]string{"test", "-c", "-cover", "-covermode=set", "-coverpkg=./...", "-o", b.bin}, buildFlags...)
-			_, b.err = output(wm.root, "go", append(args, "./"+pkg.rel)...)
-			builds[i] = b
+			args := append([]string{"test", "-c", "-cover", "-covermode=set", "-coverpkg=./...", "-o", b.bin}, o.buildFlags...)
+			_, b.err = output(wm.root, "go", append(args, "./"+b.pkg.rel)...)
 		}()
 	}
 	wg.Wait()
 	for _, b := range builds {
 		if b.err != nil {
-			return fmt.Errorf("build tests of %s: %w", b.pkg.rel, b.err)
-		}
-		if b.bin == "" {
-			skipped = append(skipped, b.pkg.rel)
-			continue
+			return stats, fmt.Errorf("build tests of %s: %w", b.pkg.rel, b.err)
 		}
 		list := exec.Command(b.bin, "-test.list", ".")
 		list.Dir = b.pkg.Dir
 		out, err := list.Output()
 		if err != nil {
-			return fmt.Errorf("list tests of %s: %w", b.pkg.rel, err)
+			return stats, fmt.Errorf("list tests of %s: %w", b.pkg.rel, err)
 		}
 		n := 0
 		for _, name := range strings.Fields(string(out)) {
@@ -208,6 +345,10 @@ func cmdRecord(args []string) error {
 				continue
 			}
 			n++
+			if i, had := oldIndex[b.pkg.rel+" "+name]; had && !sc.rerun(b.pkg.rel, name) {
+				keep(i)
+				continue
+			}
 			if b.always[name] {
 				c.Always = append(c.Always, len(c.Tests))
 			} else {
@@ -219,7 +360,21 @@ func cmdRecord(args []string) error {
 			c.Packages[b.pkg.rel] = n
 		}
 	}
-	note("recording %d tests in %d packages at %.7s with %d workers", len(c.Tests), len(c.Packages), head, *workers)
+	if old != nil {
+		for fn, tests := range old.Funcs {
+			for _, i := range tests {
+				if j, ok := oldToNew[i]; ok {
+					c.Funcs[fn] = append(c.Funcs[fn], j)
+				}
+			}
+		}
+	}
+	stats.ran, stats.kept = len(jobs), len(oldToNew)
+	if old != nil {
+		note("recording %d tests in %d packages with %d workers; keeping %d", len(jobs), len(builds), o.workers, stats.kept)
+	} else {
+		note("recording %d tests in %d packages at %.7s with %d workers", len(c.Tests), len(c.Packages), head, o.workers)
+	}
 	if len(skipped) > 0 {
 		note("not recorded (%s): %s", packageDirective, strings.Join(skipped, " "))
 	}
@@ -228,7 +383,7 @@ func cmdRecord(args []string) error {
 	goflags := strings.TrimSpace(os.Getenv("GOFLAGS") + " -cover -covermode=set -coverpkg=" + wm.path + "/...")
 	goenv, err := coverGoEnv(wm, tmp, goflags)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	type result struct {
 		index int
@@ -236,7 +391,7 @@ func cmdRecord(args []string) error {
 		err   error
 	}
 	work, results := make(chan job), make(chan result)
-	for range max(1, *workers) {
+	for range max(1, o.workers) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -244,7 +399,7 @@ func cmdRecord(args []string) error {
 				dir := filepath.Join(tmp, "cov", strconv.Itoa(j.index))
 				r := result{index: j.index}
 				if r.err = os.MkdirAll(dir, 0o755); r.err == nil {
-					r.funcs, r.err = runCovered(j.pkg, j.bin, j.name, dir, *timeout, goflags, goenv, index)
+					r.funcs, r.err = runCovered(j.pkg, j.bin, j.name, dir, o.timeout, goflags, goenv, index)
 				}
 				_ = os.RemoveAll(dir)
 				results <- r
@@ -280,22 +435,22 @@ func cmdRecord(args []string) error {
 	}
 	data, err := json.Marshal(c)
 	if err != nil {
-		return err
+		return stats, err
 	}
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(filepath.Dir(o.file), 0o755); err != nil {
+		return stats, err
 	}
-	if err := os.WriteFile(file+".tmp", data, 0o644); err != nil {
-		return err
+	if err := os.WriteFile(o.file+".tmp", data, 0o644); err != nil {
+		return stats, err
 	}
-	if err := os.Rename(file+".tmp", file); err != nil {
-		return err
+	if err := os.Rename(o.file+".tmp", o.file); err != nil {
+		return stats, err
 	}
-	note("recorded %d tests at %.7s in %s", len(c.Tests), head, time.Since(start).Round(time.Second))
+	note("recorded %d tests at %.7s in %s (%d run, %d kept)", len(c.Tests), head, time.Since(start).Round(time.Second), stats.ran, stats.kept)
 	if dirty, _ := output(m.root, "git", "status", "--porcelain", "--untracked-files=no", "."); dirty != "" {
 		note("uncommitted changes were not recorded; `gotia test` selects for them against %.7s", head)
 	}
-	return nil
+	return stats, nil
 }
 
 // coverGoEnv writes a copy of the user's go env file that adds coverage to

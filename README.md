@@ -36,7 +36,8 @@ gotia: running 16 tests in 2 packages and 3 packages in full; 13 packages skippe
   run everything. `*.md` and `.github/**` are ignored by default (`-ignore`).
 
 A stale map stays correct: gotia measures changes against the map's commit,
-so it only selects more as HEAD moves on. Re-record after pulling.
+so it only selects more as HEAD moves on. Re-record after pulling: with a
+usable map, `gotia record` only re-runs the tests the new commits can affect.
 
 ## Recording
 
@@ -44,6 +45,14 @@ so it only selects more as HEAD moves on. Re-record after pulling.
 package with `-cover -coverpkg=<module>/...`, and runs every top-level test
 alone, in parallel. A test that fails while recording always runs when its
 package is affected.
+
+When a usable map exists, `gotia record` updates it instead: it selects the
+tests the commits since the map's commit can affect, exactly as `gotia test`
+would, records only those, and keeps the rest. A kept test ran no function
+that changed, so it still runs the same functions. Changes that make
+`gotia test` run every package, such as `go.mod`, record every test.
+`-full` records every test regardless; run it now and then, since a branch a
+test takes only under some timing stays missing from kept entries.
 
 Subprocesses are covered too: a re-executed test binary and a binary the test
 builds with `go build` write their counters to the test's `GOCOVERDIR`. When a
@@ -59,7 +68,7 @@ The map lives in `.git/gotia/` and is keyed to the platform and Go version;
 
 ```
 gotia test [-list] [-json] [-all] [-base commit] [-ignore globs] [paths...] [-- go test flags]
-gotia record [-j workers] [-timeout d] [-- build flags such as -tags]
+gotia record [-full] [-j workers] [-timeout d] [-- build flags such as -tags]
 gotia why <TestName>        functions a test ran
 gotia who <Func>            tests that ran a function (Name, (*T).Method, dir/file.go:Name)
 ```
