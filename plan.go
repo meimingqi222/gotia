@@ -377,8 +377,24 @@ func (p *planner) finish(goFlagsRun bool) *plan {
 			p.whole[pkg.ImportPath] = true
 		}
 	}
-	for dep := range m.dependents(p.roots) {
+	rootDeps := m.dependents(p.roots)
+	for dep := range rootDeps {
 		p.whole[dep] = true
+	}
+	// A test can run a package's code without importing it, in a binary it
+	// builds or a process it starts. The map saw that code run, so those
+	// tests are affected too.
+	if p.c != nil && len(rootDeps) > 0 {
+		dirs := map[string]bool{}
+		for dep := range rootDeps {
+			dirs[m.byPath[dep].rel] = true
+		}
+		for fn := range p.c.Funcs {
+			file, _, _ := strings.Cut(fn, ":")
+			if dirs[path.Dir(file)] {
+				p.mapTests(fn)
+			}
+		}
 	}
 	// Function-level changes reach every package that depends on them: the
 	// map covers recorded tests; the others run whole.

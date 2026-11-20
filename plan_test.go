@@ -75,6 +75,7 @@ func fixtureMap() *coverMap {
 		"lib/lib.go:Run":            {0},
 		"lib/lib.go:Other":          {2},
 		"lib/lib.go:(*Agent).Close": {3},
+		"cmd/main.go:main":          {5}, // TestE runs the built command
 	}}
 	for _, name := range []string{"TestRun", "TestLimit", "TestOther", "TestClose", "TestAlways", "TestE", "TestF", "TestG", "TestH", "TestI"} {
 		c.Tests = append(c.Tests, "lib "+name)
@@ -103,7 +104,7 @@ func TestPlan(t *testing.T) {
 			want: want{}},
 		{name: "a const reaches its users through other declarations and imports", file: "lib/lib.go",
 			from: "const Limit = 1", to: "const Limit = 2",
-			want: want{tests: lib("TestAlways", "TestLimit", "TestRun"), whole: []string{"cmd"}}},
+			want: want{tests: lib("TestAlways", "TestE", "TestLimit", "TestRun"), whole: []string{"cmd"}}},
 		{name: "a changed type falls back to packages", file: "lib/lib.go",
 			from: "type Agent struct{}", to: "type Agent struct{ n int }",
 			want: want{whole: []string{"cmd", "lib"}}},
@@ -113,6 +114,9 @@ func TestPlan(t *testing.T) {
 		{name: "a side-effect import falls back to packages", file: "lib/lib.go",
 			from: "const Limit", to: "import _ \"embed\"\n\nconst Limit",
 			want: want{whole: []string{"cmd", "lib"}}},
+		{name: "a fallback reaches tests that run the package in a subprocess", file: "cmd/main.go",
+			from: "func main()", to: "import _ \"embed\"\n\nfunc main()",
+			want: want{tests: lib("TestE"), whole: []string{"cmd"}}},
 		{name: "a function no test ran is reported", file: "lib/lib.go",
 			from: "func Unused() {}", to: "func Unused() { _ = 1 }",
 			want: want{tests: lib("TestAlways"), whole: []string{"cmd"}, uncovered: []string{"lib/lib.go:Unused"}}},
