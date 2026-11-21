@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ import (
 	"time"
 )
 
-const mapVersion = 1
+const mapVersion = 2
 
 // Directives in test files for code coverage cannot see.
 const (
@@ -37,15 +38,14 @@ const (
 // executed. Packages and files are module-relative, so the map applies to any
 // checkout of the module.
 type coverMap struct {
-	Version   int              `json:"version"`
-	Base      string           `json:"base"`
-	GOOS      string           `json:"goos"`
-	GOARCH    string           `json:"goarch"`
-	GoVersion string           `json:"go_version"`
-	Packages  map[string]int   `json:"packages"` // package dir → recorded top-level tests
-	Tests     []string         `json:"tests"`    // "pkgdir TestName"
-	Always    []int            `json:"always"`   // tests to run whenever their package is affected
-	Funcs     map[string][]int `json:"funcs"`    // "dir/file.go:Func" → tests that ran it
+	Version    int               `json:"version"`
+	Base       string            `json:"base"`
+	Env        map[string]string `json:"env"`         // buildEnvKeys at recording
+	BuildFlags []string          `json:"build_flags"` // go test build flags given to record
+	Packages   map[string]int    `json:"packages"`    // package dir → recorded top-level tests
+	Tests      []string          `json:"tests"`       // "pkgdir TestName"
+	Always     []int             `json:"always"`      // tests to run whenever their package is affected
+	Funcs      map[string][]int  `json:"funcs"`       // "dir/file.go:Func" → tests that ran it
 }
 
 func (c *coverMap) test(i int) (pkg, name string) {
@@ -83,8 +83,14 @@ func readMap(m *module, file string) (*coverMap, string) {
 	if err := json.Unmarshal(data, &c); err != nil || c.Version != mapVersion {
 		return nil, "the coverage map is from another gotia version (run `gotia record`)"
 	}
-	if c.GOOS != runtime.GOOS || c.GOARCH != runtime.GOARCH || c.GoVersion != m.goVersion() {
-		return nil, fmt.Sprintf("the coverage map is for %s/%s %s (run `gotia record`)", c.GOOS, c.GOARCH, c.GoVersion)
+	env, err := m.buildEnv()
+	if err != nil {
+		return nil, err.Error()
+	}
+	for _, k := range buildEnvKeys {
+		if c.Env[k] != env[k] {
+			return nil, fmt.Sprintf("the coverage map was recorded with %s=%q, not %q (run `gotia record`)", k, c.Env[k], env[k])
+		}
 	}
 	if _, err := output(m.root, "git", "cat-file", "-e", c.Base+"^{commit}"); err != nil {
 		return nil, "the coverage map's commit is gone (run `gotia record`)"
@@ -105,7 +111,7 @@ func cmdRecord(args []string) error {
 		fs.PrintDefaults()
 	}
 	fs.Parse(own)
-	m, err := loadModule(".")
+	m, err := loadModule(".", buildFlags)
 	if err != nil {
 		return err
 	}
@@ -214,8 +220,17 @@ func record(m *module, o recordOptions) (recordStats, error) {
 		return stats, err
 	}
 	var old *coverMap
+	why := "-full given"
 	if !o.full {
-		old, _ = readMap(m, o.file)
+		old, why = readMap(m, o.file)
+		why, _, _ = strings.Cut(why, " (run")
+		if old != nil && !slices.Equal(old.BuildFlags, o.buildFlags) {
+			why = fmt.Sprintf("the map was recorded with build flags %q", old.BuildFlags)
+			if len(old.BuildFlags) == 0 {
+				why = "the map was recorded without build flags"
+			}
+			old = nil
+		}
 		if old != nil && old.Base == head {
 			note("the map is already at %.7s; nothing to record (-full records every test again)", head)
 			return stats, nil
@@ -233,16 +248,13 @@ func record(m *module, o recordOptions) (recordStats, error) {
 	defer func() {
 		_, _ = output(m.root, "git", "worktree", "remove", "--force", src)
 	}()
-	wm, err := loadModule(filepath.Join(src, filepath.FromSlash(prefix)))
+	wm, err := loadModule(filepath.Join(src, filepath.FromSlash(prefix)), o.buildFlags)
 	if err != nil {
 		return stats, err
 	}
 	var sc *scope
-	switch {
-	case old != nil:
-		var why string
+	if old != nil {
 		if sc, why = incrementalScope(wm, old, o.ignore); sc == nil {
-			note("recording every test: %s", why)
 			old = nil
 		} else {
 			note("updating the map from %.7s to %.7s", old.Base, head)
@@ -250,12 +262,16 @@ func record(m *module, o recordOptions) (recordStats, error) {
 				note("%s", e)
 			}
 		}
-	case !o.full:
-		note("no usable map; recording every test")
 	}
-
-	c := &coverMap{Version: mapVersion, Base: head, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
-		GoVersion: wm.goVersion(), Packages: map[string]int{}, Funcs: map[string][]int{}}
+	if old == nil && !o.full {
+		note("recording every test: %s", why)
+	}
+	env, err := wm.buildEnv()
+	if err != nil {
+		return stats, err
+	}
+	c := &coverMap{Version: mapVersion, Base: head, Env: env, BuildFlags: o.buildFlags,
+		Packages: map[string]int{}, Funcs: map[string][]int{}}
 	// Tests kept from the old map, by their index there.
 	oldIndex, oldByPkg, oldAlways := map[string]int{}, map[string][]int{}, map[int]bool{}
 	oldToNew := map[int]int{}

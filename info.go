@@ -9,7 +9,7 @@ import (
 )
 
 func loadMapForInfo() (*module, *coverMap, error) {
-	m, err := loadModule(".")
+	m, err := loadModule(".", nil)
 	if err != nil {
 		return nil, nil, err
 	}

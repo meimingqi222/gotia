@@ -34,7 +34,9 @@ type module struct {
 	byDir      map[string]*goPackage // by rel
 }
 
-func loadModule(dir string) (*module, error) {
+// loadModule lists the module's packages as a build with buildFlags (such as
+// -tags) sees them.
+func loadModule(dir string, buildFlags []string) (*module, error) {
 	gomod, err := output(dir, "go", "env", "GOMOD")
 	if err != nil {
 		return nil, err
@@ -53,7 +55,7 @@ func loadModule(dir string) (*module, error) {
 			break
 		}
 	}
-	cmd := exec.Command("go", "list", "-json", "./...")
+	cmd := exec.Command("go", append(append([]string{"list", "-json"}, buildFlags...), "./...")...)
 	cmd.Dir = m.root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -89,9 +91,17 @@ func (m *module) short(importPath string) string {
 	return importPath
 }
 
-func (m *module) goVersion() string {
-	v, _ := output(m.root, "go", "env", "GOVERSION")
-	return v
+// buildEnvKeys are the go env settings that decide what a test binary
+// contains; a coverage map applies only where they are the same.
+var buildEnvKeys = []string{"GOOS", "GOARCH", "GOVERSION", "GOFLAGS", "CGO_ENABLED", "GOEXPERIMENT"}
+
+func (m *module) buildEnv() (map[string]string, error) {
+	out, err := output(m.root, "go", append([]string{"env", "-json"}, buildEnvKeys...)...)
+	if err != nil {
+		return nil, err
+	}
+	env := map[string]string{}
+	return env, json.Unmarshal([]byte(out), &env)
 }
 
 // changedFiles lists module-relative files that differ from base, including

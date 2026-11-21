@@ -61,7 +61,10 @@ test runs module code in a way coverage cannot see, mark it in its test file:
 - `//gotia:always` in a test's doc comment runs it whenever its package is affected.
 - `//gotia:package` anywhere in a test file runs that whole package whenever it is affected.
 
-The map lives in `.git/gotia/` and is keyed to the platform and Go version;
+The map lives in `.git/gotia/` and is keyed to the platform, the Go version,
+`GOFLAGS`, `CGO_ENABLED`, `GOEXPERIMENT` and the build flags given to `gotia
+record`. `gotia test` uses it only with the same `-tags`, and `gotia record`
+with other build flags records every test again.
 `GOTIA_MAP` or `-map` picks another file, for example one CI recorded on main.
 
 ## Flags

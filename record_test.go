@@ -14,34 +14,7 @@ import (
 // the map a full record of the new commit gives, while running only the
 // tests those commits can affect.
 func TestIncrementalRecordMatchesFull(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	root := t.TempDir()
-	write := func(files map[string]string) {
-		for rel, text := range files {
-			p := filepath.Join(root, filepath.FromSlash(rel))
-			if text == "" {
-				if err := os.Remove(p); err != nil {
-					t.Fatal(err)
-				}
-				continue
-			}
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	git := func(args ...string) {
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
-		cmd.Dir = root
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
+	root, write, git := newRepo(t)
 	write(map[string]string{
 		"go.mod":         "module example.com/m\n\ngo 1.24\n",
 		"a/a.go":         "package a\n\nfunc A() int { return 1 }\n\nfunc B() int { return 2 }\n",
@@ -54,7 +27,7 @@ func TestIncrementalRecordMatchesFull(t *testing.T) {
 	git("init", "-q")
 	git("add", ".")
 	git("commit", "-q", "-m", "one")
-	m, err := loadModule(root)
+	m, err := loadModule(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +47,7 @@ func TestIncrementalRecordMatchesFull(t *testing.T) {
 	})
 	git("add", "-A")
 	git("commit", "-q", "-m", "two")
-	if m, err = loadModule(root); err != nil {
+	if m, err = loadModule(root, nil); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := record(m, opts)
@@ -96,6 +69,83 @@ func TestIncrementalRecordMatchesFull(t *testing.T) {
 	if stats, err := record(m, opts); err != nil || stats.ran+stats.kept != 0 {
 		t.Fatalf("a current map was recorded again: %+v %v", stats, err)
 	}
+}
+
+// TestRecordUnderOtherBuildFlags: a map recorded without -tags must not be
+// kept or updated by a record with them, which sees other tests and
+// packages, and gotia test with other -tags must not use it.
+func TestRecordUnderOtherBuildFlags(t *testing.T) {
+	root, write, git := newRepo(t)
+	write(map[string]string{
+		"go.mod":           "module example.com/m\n\ngo 1.24\n",
+		"a/a.go":           "package a\n\nfunc A() {}\n",
+		"a/a_test.go":      "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+		"a/x_test.go":      "//go:build x\n\npackage a\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) { A() }\n",
+		"tagged/t.go":      "//go:build x\n\npackage tagged\n\nfunc T() {}\n",
+		"tagged/t_test.go": "//go:build x\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestT(t *testing.T) { T() }\n",
+	})
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	m, err := loadModule(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := recordOptions{file: filepath.Join(t.TempDir(), "map.json"), timeout: time.Minute, workers: 2, ignore: splitList(defaultIgnore)}
+	if _, err := record(m, opts); err != nil {
+		t.Fatal(err)
+	}
+	if pl, err := makePlan(m, opts.file, "", nil, opts.ignore, []string{"-tags", "x"}); err != nil || pl.Map {
+		t.Errorf("gotia test -tags x used a map recorded without tags: %v", err)
+	}
+	opts.buildFlags = []string{"-tags=x"}
+	if stats, err := record(m, opts); err != nil || stats.kept != 0 {
+		t.Fatalf("record -tags=x kept %d tests recorded without tags: %v", stats.kept, err)
+	}
+	got := readTestMap(t, m, opts.file)
+	for _, test := range []string{"a TestA", "a TestTagged", "tagged TestT"} {
+		if _, ok := got[test]; !ok {
+			t.Errorf("record -tags=x did not record %s: %v", test, got)
+		}
+	}
+	if pl, err := makePlan(m, opts.file, "", nil, opts.ignore, []string{"-tags=x", "-count=1"}); err != nil || !pl.Map {
+		t.Errorf("gotia test -tags=x did not use the map recorded with -tags=x: %v %+v", err, pl)
+	}
+}
+
+// newRepo creates an empty git repository. write writes files in it, an
+// empty text removing one; git runs git there.
+func newRepo(t *testing.T) (root string, write func(map[string]string), git func(...string)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root = t.TempDir()
+	write = func(files map[string]string) {
+		for rel, text := range files {
+			p := filepath.Join(root, filepath.FromSlash(rel))
+			if text == "" {
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	git = func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return root, write, git
 }
 
 // readTestMap is a map's content without its indices: each test with the

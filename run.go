@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -27,7 +29,11 @@ func cmdTest(args []string) error {
 		fs.PrintDefaults()
 	}
 	fs.Parse(own)
-	m, err := loadModule(".")
+	var listFlags []string
+	if t := buildTags(goFlags); t != "" {
+		listFlags = []string{"-tags=" + t}
+	}
+	m, err := loadModule(".", listFlags)
 	if err != nil {
 		return err
 	}
@@ -38,7 +44,7 @@ func cmdTest(args []string) error {
 			pl.Whole = append(pl.Whole, m.short(pkg.ImportPath))
 		}
 	} else {
-		if pl, err = makePlan(m, *mapFlag, *base, fs.Args(), splitList(*ignore), hasRun(goFlags)); err != nil {
+		if pl, err = makePlan(m, *mapFlag, *base, fs.Args(), splitList(*ignore), goFlags); err != nil {
 			return err
 		}
 	}
@@ -61,7 +67,8 @@ func cmdTest(args []string) error {
 	return execute(m, pl.Commands)
 }
 
-func makePlan(m *module, mapFile, base string, paths, ignore []string, goFlagsRun bool) (*plan, error) {
+func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) (*plan, error) {
+	goFlagsRun := hasRun(goFlags)
 	var c *coverMap
 	var mapNote string
 	if mapFile == "" {
@@ -75,6 +82,9 @@ func makePlan(m *module, mapFile, base string, paths, ignore []string, goFlagsRu
 	}
 	if goFlagsRun && c != nil {
 		c, mapNote = nil, "-run given; selecting whole packages"
+	}
+	if c != nil && buildTags(goFlags) != buildTags(c.BuildFlags) {
+		c, mapNote = nil, fmt.Sprintf("-tags differ from the map's (%q); selecting whole packages", buildTags(c.BuildFlags))
 	}
 	if base == "" {
 		base = "HEAD"
@@ -185,6 +195,24 @@ func hasRun(flags []string) bool {
 		}
 	}
 	return false
+}
+
+// buildTags returns the build tags that go command flags set, sorted and
+// joined with commas. The last -tags flag wins, as in the go command.
+func buildTags(flags []string) string {
+	var tags []string
+	for i, f := range flags {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(f, "-"), "=")
+		if !strings.HasPrefix(f, "-") || name != "tags" {
+			continue
+		}
+		if !hasValue && i+1 < len(flags) {
+			value = flags[i+1]
+		}
+		tags = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	sort.Strings(tags)
+	return strings.Join(slices.Compact(tags), ",")
 }
 
 func splitList(s string) []string {
