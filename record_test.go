@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -172,4 +174,23 @@ func readTestMap(t *testing.T, m *module, file string) map[string][]string {
 		sort.Strings(fns)
 	}
 	return out
+}
+
+// TestSplitArgs: go test flags pass through without "--", and gotia's own
+// flags may follow paths.
+func TestSplitArgs(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.Bool("list", false, "")
+	fs.String("map", "", "")
+	for _, tc := range []struct{ args, own, rest []string }{
+		{[]string{"-race", "-count=1"}, nil, []string{"-race", "-count=1"}},
+		{[]string{"a.go", "-list", "-run", "TestA"}, []string{"-list", "a.go"}, []string{"-run", "TestA"}},
+		{[]string{"-map", "m.json", "-v"}, []string{"-map", "m.json"}, []string{"-v"}},
+		{[]string{"-list", "--", "-list"}, []string{"-list"}, []string{"-list"}},
+	} {
+		own, rest := splitArgs(fs, tc.args)
+		if !slices.Equal(own, tc.own) || !slices.Equal(rest, tc.rest) {
+			t.Errorf("splitArgs(%q) = %q, %q; want %q, %q", tc.args, own, rest, tc.own, tc.rest)
+		}
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -260,5 +261,50 @@ func TestChangesOutsideTheModule(t *testing.T) {
 				t.Errorf("a change to the other module ran %v (%v)", pl.Whole, pl.Effects)
 			}
 		})
+	}
+}
+
+// TestPatternsAndNoCommit: ./pkg/... keeps only the changes under pkg, and
+// a repository without commits runs every package instead of failing.
+func TestPatternsAndNoCommit(t *testing.T) {
+	root, write, git := newRepo(t)
+	write(map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.24\n",
+		"a/a.go": "package a\n\nfunc A() {}\n",
+		"b/b.go": "package b\n",
+	})
+	git("init", "-q")
+	m, err := loadModule(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := func(paths ...string) *plan {
+		t.Helper()
+		pl, err := makePlan(m, filepath.Join(t.TempDir(), "none.json"), "", paths, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pl
+	}
+	if pl := plan(); len(pl.Whole) != 2 {
+		t.Errorf("without commits ran %v, want every package", pl.Whole)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	write(map[string]string{"a/a.go": "package a\n\nfunc A() { println() }\n"})
+	for _, tc := range []struct {
+		paths []string
+		want  []string
+	}{
+		{nil, []string{"a"}},
+		{[]string{"./..."}, []string{"a"}},
+		{[]string{root + "/a/..."}, []string{"a"}},
+		{[]string{"b/..."}, nil},
+		{[]string{"b"}, []string{"b"}}, // a directory counts as changed
+	} {
+		t.Chdir(root)
+		if got := plan(tc.paths...).Whole; !slices.Equal(got, tc.want) {
+			t.Errorf("gotia test %v ran %v, want %v", tc.paths, got, tc.want)
+		}
 	}
 }

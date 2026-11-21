@@ -10,6 +10,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,10 +20,10 @@ import (
 const usage = `gotia runs only the Go tests a change can affect.
 
 Usage:
-  gotia test [flags] [paths...] [-- go test flags]
-        run the tests affected by the given files, or by every change
-        against the coverage map's commit (HEAD without a map)
-  gotia record [flags] [-- go test build flags]
+  gotia test [flags] [paths...] [go test flags]
+        run the tests affected by every change against the coverage map's
+        commit (HEAD without a map); paths such as ./pkg/... limit it
+  gotia record [flags] [go test build flags]
         record which functions each test of HEAD runs (about a minute)
   gotia why <test>
         list the functions a recorded test ran
@@ -66,14 +67,35 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 
-// splitArgs separates gotia's own arguments from those after "--".
-func splitArgs(args []string) (own, rest []string) {
-	for i, a := range args {
+// splitArgs separates gotia's own arguments from the go command's: those
+// after "--", or from the first flag fs does not define, so that
+// "gotia test -race -count=1" works like "gotia test -- -race -count=1".
+// Own flags come first in own, so they may follow paths.
+func splitArgs(fs *flag.FlagSet, args []string) (own, rest []string) {
+	var paths []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--" {
-			return args[:i], args[i+1:]
+			rest = args[i+1:]
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			paths = append(paths, a)
+			continue
+		}
+		name, _, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		f := fs.Lookup(name)
+		if f == nil && name != "h" && name != "help" {
+			rest = args[i:]
+			break
+		}
+		own = append(own, a)
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); f != nil && !hasValue && !(ok && b.IsBoolFlag()) && i+1 < len(args) {
+			i++
+			own = append(own, args[i])
 		}
 	}
-	return args, nil
+	return append(own, paths...), rest
 }
 
 // output runs a command in dir and returns its trimmed standard output.

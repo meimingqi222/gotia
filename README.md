@@ -21,7 +21,14 @@ saying what it selected and why:
 gotia: per-test selection from the coverage map at 8d414aa
 gotia: harness/openai.go: parseRetryAfter → 16 tests that ran them
 gotia: running 16 tests in 2 packages and 3 packages in full; 13 packages skipped
+...go test output...
+gotia: FAIL harness: TestRetryAfter; rerun: go test -run '^(TestRetryAfter)$' ./harness
 ```
+
+The last lines are the result for agents and scripts: `gotia: PASS: ...`, or
+one `gotia: FAIL` line per failed package with its failed tests and the
+command that reruns only them. `gotia: nothing to test` means no test can
+reach the change. A repository without commits runs every package.
 
 - **Without a map** it runs the changed packages and every package that
   imports them, directly or through tests.
@@ -72,15 +79,18 @@ with other build flags records every test again.
 ## Flags
 
 ```
-gotia test [-list] [-json] [-all] [-base commit] [-ignore globs] [paths...] [-- go test flags]
-gotia record [-full] [-j workers] [-timeout d] [-- build flags such as -tags]
+gotia test [-list] [-json] [-all] [-base commit] [-ignore globs] [paths...] [go test flags]
+gotia record [-full] [-j workers] [-timeout d] [build flags such as -tags]
 gotia why <TestName>        functions a test ran
 gotia who <Func>            tests that ran a function (Name, (*T).Method, dir/file.go:Name)
 ```
 
-`-json` prints the plan, including the exact `go test` commands, for scripts and
-agents. Flags after `--` go to every `go test` command; `-run` among them turns
-per-test selection off.
+Paths limit `gotia test`: `./pkg/...` keeps only the changes under pkg, and a
+file or directory runs what it affects as if it changed. `-json` prints the
+plan, including the exact `go test` commands, for scripts and agents. Flags
+gotia does not define, and everything after `--`, go to every `go test`
+command (`-- -json` for go test's own JSON); `-run` among them turns per-test
+selection off.
 
 ## Limits
 

@@ -101,21 +101,25 @@ func contains(list []int, v int) bool {
 
 const guide = `## Running tests
 
-- After a change, run ` + "`go tool gotia test`" + ` instead of ` + "`go test ./...`" + `. It runs only the
-  tests the change can affect (committed, staged, unstaged and untracked changes)
-  and prints one line per changed file saying what it selected and why.
-- Pass go test flags after ` + "`--`" + `: ` + "`go tool gotia test -- -race -count=1`" + `. Pass files to
-  check only them: ` + "`go tool gotia test path/to/file.go`" + `. ` + "`-list`" + ` previews the plan and
-  ` + "`-json`" + ` prints it for scripts.
-- To run one test while iterating, use go test directly:
-  ` + "`go test -run '^TestName$' ./pkg`" + `.
-- Without a coverage map gotia selects whole packages (changed packages and their
-  dependents). ` + "`go tool gotia record`" + ` (about a minute) records which functions each
-  test runs, so later runs select single tests. Re-record after pulling: it
-  only re-runs the tests the new commits affect. A stale map stays correct
-  but selects more.
+- After changing Go code, run ` + "`go tool gotia test`" + ` instead of ` + "`go test ./...`" + `. It runs only
+  the tests the change can affect (committed, staged, unstaged and untracked
+  changes) and prints one line per changed file saying what it selected and why.
+- It takes go test flags directly: ` + "`go tool gotia test -race -count=1`" + `. ` + "`./pkg/...`" + ` keeps
+  only the changes under pkg; a file or directory runs what it affects as if it
+  changed. ` + "`-list`" + ` previews the plan; ` + "`-json`" + ` prints it with the exact go test
+  commands without running them (` + "`-- -json`" + ` passes -json to go test instead).
+- The last lines give the result. ` + "`gotia: PASS: ...`" + ` means every test the change can
+  affect passed. ` + "`gotia: FAIL pkg: TestX; rerun: go test ...`" + ` names each failed test
+  and the command that reruns only it: use that command while fixing, then run
+  ` + "`go tool gotia test`" + ` again.
+- ` + "`gotia: nothing to test`" + ` is a correct result: no test can reach what changed
+  (comments, formatting, docs). Do not run ` + "`go test ./...`" + ` because of it.
 - "no recorded test runs X" means no test executes a function you changed:
   add one if the change matters.
+- Without a coverage map gotia runs whole packages (the changed ones and their
+  dependents). ` + "`go tool gotia record`" + ` records which functions each test runs, so later
+  runs select single tests; run it when gotia says the map is missing or
+  behind. It re-runs only the tests that new commits affect.
 - Run the full suite (` + "`go test ./...`" + `) before delivery; CI runs it too.
 - Coverage sees subprocesses that re-run the test binary or binaries a test
   builds with ` + "`go build`" + `. When a test runs module code another way, put

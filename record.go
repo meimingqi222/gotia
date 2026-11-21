@@ -99,7 +99,6 @@ func readMap(m *module, file string) (*coverMap, string) {
 }
 
 func cmdRecord(args []string) error {
-	own, buildFlags := splitArgs(args)
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
 	mapFlag := fs.String("map", "", "map file (default: inside .git, or $GOTIA_MAP)")
 	full := fs.Bool("full", false, "record every test, even when the map could be updated incrementally")
@@ -110,6 +109,7 @@ func cmdRecord(args []string) error {
 		fmt.Fprintln(os.Stderr, "usage: gotia record [flags] [-- go test build flags, such as -tags]\n\nRecords which functions each test of HEAD executes, running each test alone\nwith coverage in a temporary checkout. With a usable map it re-records only the\ntests that the commits since the map's commit can affect, and keeps the rest.\nUncommitted changes are not recorded.")
 		fs.PrintDefaults()
 	}
+	own, buildFlags := splitArgs(fs, args)
 	fs.Parse(own)
 	m, err := loadModule(".", buildFlags)
 	if err != nil {
