@@ -74,28 +74,31 @@ func defaultMapPath(m *module) (string, error) {
 }
 
 // readMap returns the map at file, or nil and the reason it cannot be used.
-func readMap(m *module, file string) (*coverMap, string) {
+// replace is true when no setting explains that, so recording it again is
+// always right: the map is missing, from another gotia version, unreadable,
+// or its commit is gone.
+func readMap(m *module, file string) (c *coverMap, why string, replace bool) {
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, "no coverage map (run `gotia record` for per-test selection)"
+		return nil, "no coverage map (run `gotia record` for per-test selection)", true
 	}
-	var c coverMap
-	if err := json.Unmarshal(data, &c); err != nil || c.Version != mapVersion {
-		return nil, "the coverage map is from another gotia version (run `gotia record`)"
+	c = &coverMap{}
+	if err := json.Unmarshal(data, c); err != nil || c.Version != mapVersion {
+		return nil, "the coverage map is from another gotia version (run `gotia record`)", true
 	}
 	env, err := m.buildEnv()
 	if err != nil {
-		return nil, err.Error()
+		return nil, err.Error(), false
 	}
 	for _, k := range buildEnvKeys {
 		if c.Env[k] != env[k] {
-			return nil, fmt.Sprintf("the coverage map was recorded with %s=%q, not %q (run `gotia record`)", k, c.Env[k], env[k])
+			return nil, fmt.Sprintf("the coverage map was recorded with %s=%q, not %q (run `gotia record`)", k, c.Env[k], env[k]), false
 		}
 	}
 	if _, err := output(m.root, "git", "cat-file", "-e", c.Base+"^{commit}"); err != nil {
-		return nil, "the coverage map's commit is gone (run `gotia record`)"
+		return nil, "the coverage map's commit is gone (run `gotia record`)", true
 	}
-	return &c, ""
+	return c, "", false
 }
 
 func cmdRecord(args []string) error {
@@ -270,7 +273,7 @@ func record(m *module, o recordOptions) (recordStats, error) {
 	var old *coverMap
 	why := "-full given"
 	if !o.full {
-		old, why = readMap(m, o.file)
+		old, why, _ = readMap(m, o.file)
 		why, _, _ = strings.Cut(why, " (run")
 		if old != nil && !slices.Equal(old.BuildFlags, o.buildFlags) {
 			why = fmt.Sprintf("the map was recorded with build flags %q", old.BuildFlags)

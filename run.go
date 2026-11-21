@@ -58,7 +58,8 @@ func cmdTest(args []string) error {
 		if _, err := os.Stat(pl.refresh); err != nil {
 			pl.MapNote = "no coverage map yet, so whole packages run; " + update
 		} else {
-			pl.MapNote += "; " + update
+			note, _, _ := strings.Cut(pl.MapNote, " (run")
+			pl.MapNote = strings.TrimPrefix(note+"; ", "; ") + update
 		}
 	}
 	pl.commands(m, goFlags)
@@ -149,8 +150,8 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 	var refresh string
 	var refreshFlags []string
 	if mapFile != "" {
-		c, mapNote = readMap(m, mapFile)
-		if _, err := os.Stat(mapFile); errors.Is(err, os.ErrNotExist) {
+		var replace bool
+		if c, mapNote, replace = readMap(m, mapFile); replace {
 			refresh = mapFile
 			if t := buildTags(goFlags); t != "" {
 				refreshFlags = []string{"-tags=" + t}

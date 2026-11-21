@@ -50,8 +50,9 @@ so it only selects more as HEAD moves on.
 behind HEAD, it starts `gotia record` in the background after its run, on
 half the CPUs, with the map's build flags; the next `gotia test` uses the new
 map. A lock file lets one record at a time update the map, and its output
-goes to the `.log` file next to the map. A map recorded under another Go
-version or `GOFLAGS` is left alone; `gotia record` replaces it. Set
+goes to the `.log` file next to the map. A map an older gotia wrote, or
+whose commit is gone, is replaced the same way; a map recorded under another
+Go version or `GOFLAGS` is left alone, and `gotia record` replaces it. Set
 `GOTIA_AUTO_RECORD=0` to turn this off; in CI (`$CI` set) it is off unless
 `GOTIA_AUTO_RECORD=1`. Maps named with `-map` or `GOTIA_MAP` are never
 updated automatically.

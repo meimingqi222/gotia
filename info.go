@@ -17,7 +17,7 @@ func loadMapForInfo() (*module, *coverMap, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	c, why := readMap(m, file)
+	c, why, _ := readMap(m, file)
 	if c == nil {
 		return nil, nil, errors.New(why)
 	}

@@ -169,7 +169,7 @@ func TestHoldMapLock(t *testing.T) {
 // functions it ran, and whether it always runs.
 func readTestMap(t *testing.T, m *module, file string) map[string][]string {
 	t.Helper()
-	c, why := readMap(m, file)
+	c, why, _ := readMap(m, file)
 	if c == nil {
 		t.Fatal(why)
 	}
@@ -256,10 +256,27 @@ func TestMapRefresh(t *testing.T) {
 	if got, flags := refresh(); got != file || !slices.Equal(flags, opts.buildFlags) {
 		t.Errorf("a map behind HEAD: refresh %q %q, want %s with the map's flags", got, flags, file)
 	}
+	// A map an older gotia wrote is replaced, not left to select packages.
+	if err := os.WriteFile(file, []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := refresh(); got != file {
+		t.Errorf("a map from another gotia version was not refreshed")
+	}
 	t.Setenv("GOTIA_MAP", file)
 	if got, _ := refresh(); got != "" {
 		t.Errorf("a $GOTIA_MAP map was refreshed")
 	}
+	t.Setenv("GOTIA_MAP", "")
+	if _, err := record(m, opts); err != nil {
+		t.Fatal(err)
+	}
+	// A map recorded under other settings is left alone.
+	t.Setenv("GOFLAGS", "-mod=mod")
+	if got, _ := refresh(); got != "" {
+		t.Errorf("a map recorded under another GOFLAGS was refreshed")
+	}
+	t.Setenv("GOFLAGS", "")
 
 	unlock, err := lockMap(file)
 	if err != nil {
