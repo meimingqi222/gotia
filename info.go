@@ -116,10 +116,10 @@ const guide = `## Running tests
   (comments, formatting, docs). Do not run ` + "`go test ./...`" + ` because of it.
 - "no recorded test runs X" means no test executes a function you changed:
   add one if the change matters.
-- Without a coverage map gotia runs whole packages (the changed ones and their
-  dependents). ` + "`go tool gotia record`" + ` records which functions each test runs, so later
-  runs select single tests; run it when gotia says the map is missing or
-  behind. It re-runs only the tests that new commits affect.
+- gotia keeps its coverage map (which functions each test runs) up to date by
+  itself: when the map is missing or behind HEAD, it updates it in the
+  background after the run. Until then it selects more, never fewer, tests.
+  You do not need to run ` + "`go tool gotia record`" + `.
 - Run the full suite (` + "`go test ./...`" + `) before delivery; CI runs it too.
 - Coverage sees subprocesses that re-run the test binary or binaries a test
   builds with ` + "`go build`" + `. When a test runs module code another way, put

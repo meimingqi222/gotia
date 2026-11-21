@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -47,6 +49,18 @@ func cmdTest(args []string) error {
 			return err
 		}
 	}
+	refresh := pl.refresh != "" && !*list && !*jsonOut && autoRecord()
+	if refresh {
+		update := "gotia updates it in the background after this run"
+		if mapLocked(pl.refresh) {
+			refresh, update = false, "a gotia record is updating it in the background"
+		}
+		if _, err := os.Stat(pl.refresh); err != nil {
+			pl.MapNote = "no coverage map yet, so whole packages run; " + update
+		} else {
+			pl.MapNote += "; " + update
+		}
+	}
 	pl.commands(m, goFlags)
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
@@ -60,10 +74,57 @@ func cmdTest(args []string) error {
 		}
 		return nil
 	}
-	if len(pl.Commands) == 0 {
-		return nil
+	if len(pl.Commands) > 0 {
+		err = execute(m, pl, goFlags)
 	}
-	return execute(m, pl, goFlags)
+	if refresh {
+		if log, err := recordInBackground(m, pl.refresh, pl.refreshFlags); err != nil {
+			fmt.Fprintln(os.Stderr, "gotia: could not update the map in the background:", err)
+		} else {
+			note("updating the map in the background (log: %s)", log)
+		}
+	}
+	return err
+}
+
+// autoRecord reports whether gotia test may update the map: unless
+// GOTIA_AUTO_RECORD is 0, and in CI only when it is 1. A record being
+// recorded (GOTIA_RECORD) never starts another.
+func autoRecord() bool {
+	switch os.Getenv("GOTIA_AUTO_RECORD") {
+	case "0":
+		return false
+	case "1":
+		return os.Getenv("GOTIA_RECORD") == ""
+	}
+	return os.Getenv("CI") == "" && os.Getenv("GOTIA_RECORD") == ""
+}
+
+// recordInBackground starts gotia record for file in a process of its own
+// on half the CPUs, so the next gotia test selects from a current map.
+func recordInBackground(m *module, file string, buildFlags []string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	log := file + ".log"
+	if err := os.MkdirAll(filepath.Dir(log), 0o755); err != nil {
+		return "", err
+	}
+	out, err := os.Create(log)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	args := append([]string{"record", "-map", file, "-j", strconv.Itoa(max(1, runtime.NumCPU()/2)), "--"}, buildFlags...)
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = m.root
+	cmd.Stdout, cmd.Stderr = out, out
+	detach(cmd)
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	return log, cmd.Process.Release()
 }
 
 func allPlan(m *module, why string) *plan {
@@ -76,6 +137,7 @@ func allPlan(m *module, why string) *plan {
 
 func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) (*plan, error) {
 	goFlagsRun := hasFlag(goFlags, "run")
+	ownMap := mapFile == "" && os.Getenv("GOTIA_MAP") == "" // the one gotia keeps up to date
 	var c *coverMap
 	var mapNote string
 	if mapFile == "" {
@@ -84,9 +146,18 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 			mapNote = "no git repository; per-test selection needs one"
 		}
 	}
+	var refresh string
+	var refreshFlags []string
 	if mapFile != "" {
 		c, mapNote = readMap(m, mapFile)
+		if _, err := os.Stat(mapFile); errors.Is(err, os.ErrNotExist) {
+			refresh = mapFile
+			if t := buildTags(goFlags); t != "" {
+				refreshFlags = []string{"-tags=" + t}
+			}
+		}
 	}
+	recorded := c
 	if goFlagsRun && c != nil {
 		c, mapNote = nil, "-run given; selecting whole packages"
 	}
@@ -137,10 +208,16 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 	default:
 		commit = ""
 	}
-	if c != nil {
-		if behind, err := output(m.root, "git", "rev-list", "--count", commit+"..HEAD"); err == nil && behind != "0" {
-			mapNote = fmt.Sprintf("the map is %s commits behind HEAD; `gotia record` keeps selection narrow", behind)
+	if recorded != nil {
+		if behind, err := output(m.root, "git", "rev-list", "--count", recorded.Base+"..HEAD"); err == nil && behind != "0" {
+			refresh, refreshFlags = mapFile, recorded.BuildFlags
+			if c != nil {
+				mapNote = fmt.Sprintf("the map is %s commits behind HEAD, so selection is wider until it is updated", behind)
+			}
 		}
+	}
+	if commit == "" || !ownMap {
+		refresh = "" // nothing to record, or a map someone else keeps
 	}
 	files := named
 	var unseen []string
@@ -175,6 +252,7 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 	}
 	pl := p.finish(goFlagsRun)
 	pl.MapNote = mapNote
+	pl.refresh, pl.refreshFlags = refresh, refreshFlags
 	if len(files)+len(unseen) == 0 {
 		where := ""
 		if len(trees) > 0 && !slices.Contains(trees, ".") {

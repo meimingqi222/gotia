@@ -211,9 +211,54 @@ func gotiaDirectives(src []byte) string {
 	return b.String()
 }
 
+// lockMap takes the lock that lets one gotia record at a time write the
+// map: an operating system lock on the map's lock file, which ends with the
+// process that holds it however that process ends.
+func lockMap(file string) (unlock func(), err error) {
+	lock := file + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := tryLock(f)
+	if err != nil || !ok {
+		f.Close()
+		if err == nil {
+			err = errors.New("another gotia record is updating the map")
+		}
+		return nil, err
+	}
+	return func() {
+		_ = unlockFile(f)
+		f.Close()
+	}, nil
+}
+
+// mapLocked reports whether a gotia record is updating the map.
+func mapLocked(file string) bool {
+	f, err := os.OpenFile(file+".lock", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	ok, err := tryLock(f)
+	if ok {
+		_ = unlockFile(f)
+	}
+	return err == nil && !ok
+}
+
 func record(m *module, o recordOptions) (recordStats, error) {
 	var stats recordStats
 	start := time.Now()
+	unlock, err := lockMap(o.file)
+	if err != nil {
+		return stats, err
+	}
+	defer unlock()
 	head, err := output(m.root, "git", "rev-parse", "HEAD")
 	if err != nil {
 		return stats, err
@@ -245,6 +290,8 @@ func record(m *module, o recordOptions) (recordStats, error) {
 	}
 	defer os.RemoveAll(tmp)
 	src := filepath.Join(tmp, "src")
+	// Forget the worktrees of records that were killed.
+	_, _ = output(m.root, "git", "worktree", "prune")
 	if _, err := output(m.root, "git", "worktree", "add", "--detach", src, head); err != nil {
 		return stats, err
 	}

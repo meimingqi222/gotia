@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +152,19 @@ func newRepo(t *testing.T) (root string, write func(map[string]string), git func
 	return root, write, git
 }
 
+// TestHoldMapLock is the process TestMapRefresh kills while it holds a lock.
+func TestHoldMapLock(t *testing.T) {
+	file := os.Getenv("GOTIA_TEST_LOCK")
+	if file == "" {
+		t.Skip("run by TestMapRefresh")
+	}
+	if _, err := lockMap(file); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("locked")
+	time.Sleep(time.Minute)
+}
+
 // readTestMap is a map's content without its indices: each test with the
 // functions it ran, and whether it always runs.
 func readTestMap(t *testing.T, m *module, file string) map[string][]string {
@@ -192,5 +207,103 @@ func TestSplitArgs(t *testing.T) {
 		if !slices.Equal(own, tc.own) || !slices.Equal(rest, tc.rest) {
 			t.Errorf("splitArgs(%q) = %q, %q; want %q, %q", tc.args, own, rest, tc.own, tc.rest)
 		}
+	}
+}
+
+// TestMapRefresh: gotia test asks for its own map to be recorded when it is
+// missing or behind HEAD, with the map's build flags, and one record at a
+// time holds the map.
+func TestMapRefresh(t *testing.T) {
+	root, write, git := newRepo(t)
+	write(map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.24\n",
+		"a/a.go":      "package a\n\nfunc A() {}\n",
+		"a/a_test.go": "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+	})
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	m, err := loadModule(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOTIA_MAP", "")
+	t.Chdir(root)
+	file, err := defaultMapPath(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh := func(goFlags ...string) (string, []string) {
+		t.Helper()
+		pl, err := makePlan(m, "", "", nil, nil, goFlags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pl.refresh, pl.refreshFlags
+	}
+	if got, flags := refresh("-tags=x"); got != file || !slices.Equal(flags, []string{"-tags=x"}) {
+		t.Errorf("no map: refresh %q %q, want %s with -tags=x", got, flags, file)
+	}
+	opts := recordOptions{file: file, timeout: time.Minute, workers: 1, buildFlags: []string{"-tags=y"}}
+	if _, err := record(m, opts); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := refresh(); got != "" {
+		t.Errorf("a map at HEAD was refreshed")
+	}
+	write(map[string]string{"a/a.go": "package a\n\nfunc A() { println() }\n"})
+	git("commit", "-q", "-am", "two")
+	if got, flags := refresh(); got != file || !slices.Equal(flags, opts.buildFlags) {
+		t.Errorf("a map behind HEAD: refresh %q %q, want %s with the map's flags", got, flags, file)
+	}
+	t.Setenv("GOTIA_MAP", file)
+	if got, _ := refresh(); got != "" {
+		t.Errorf("a $GOTIA_MAP map was refreshed")
+	}
+
+	unlock, err := lockMap(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mapLocked(file) {
+		t.Error("a locked map does not read as locked")
+	}
+	if _, err := record(m, opts); err == nil {
+		t.Error("a record ran while another held the map")
+	}
+	unlock()
+	if mapLocked(file) {
+		t.Error("an unlocked map reads as locked")
+	}
+	// A record that is killed holds the lock no longer: another process
+	// holds it here, and the next record takes it once that one is killed.
+	holder := exec.Command(os.Args[0], "-test.run=^TestHoldMapLock$")
+	holder.Env = append(os.Environ(), "GOTIA_TEST_LOCK="+file)
+	out, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Process.Kill()
+	if line, _ := bufio.NewReader(out).ReadString('\n'); line != "locked\n" {
+		t.Fatalf("lock holder printed %q", line)
+	}
+	if !mapLocked(file) {
+		t.Error("a map another process locked does not read as locked")
+	}
+	if _, err := record(m, opts); err == nil {
+		t.Error("a record ran while another process held the map")
+	}
+	if err := holder.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = holder.Wait()
+	if mapLocked(file) {
+		t.Error("the lock of a killed process still reads as locked")
+	}
+	if _, err := record(m, opts); err != nil {
+		t.Errorf("a record did not take the lock of a killed process: %v", err)
 	}
 }

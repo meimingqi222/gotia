@@ -24,6 +24,11 @@ type plan struct {
 	Uncovered []string            `json:"uncovered,omitempty"`
 	Skipped   int                 `json:"skipped_packages"` // packages not run at all
 	Commands  [][]string          `json:"commands"`
+
+	// refresh, when set, is a default map that is missing or behind HEAD,
+	// to record with refreshFlags.
+	refresh      string
+	refreshFlags []string
 }
 
 type planner struct {

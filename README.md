@@ -7,7 +7,6 @@ every small change.
 ```sh
 go get -tool github.com/meimingqi222/gotia@latest   # Go 1.24+
 go tool gotia test                                  # instead of go test ./...
-go tool gotia record                                # optional: per-test selection
 go tool gotia guide >> AGENTS.md                    # tell agents how to use it
 ```
 
@@ -32,7 +31,7 @@ reach the change. A repository without commits runs every package.
 
 - **Without a map** it runs the changed packages and every package that
   imports them, directly or through tests.
-- **With a map** (`gotia record`) it runs only the tests that executed a changed
+- **With a map** it runs only the tests that executed a changed
   function. Changes are compared token by token, so comments and formatting
   select nothing. A changed `var` or `const` selects the tests that ran a
   function using it, across packages. A changed test runs by name.
@@ -45,12 +44,21 @@ reach the change. A repository without commits runs every package.
   the repository, whose changes git cannot show. `*.md` and `.github/**` are ignored by default (`-ignore`).
 
 A stale map stays correct: gotia measures changes against the map's commit,
-so it only selects more as HEAD moves on. Re-record after pulling: with a
-usable map, `gotia record` only re-runs the tests the new commits can affect.
+so it only selects more as HEAD moves on.
+
+`gotia test` keeps the map current by itself. When the map is missing or
+behind HEAD, it starts `gotia record` in the background after its run, on
+half the CPUs, with the map's build flags; the next `gotia test` uses the new
+map. A lock file lets one record at a time update the map, and its output
+goes to the `.log` file next to the map. A map recorded under another Go
+version or `GOFLAGS` is left alone; `gotia record` replaces it. Set
+`GOTIA_AUTO_RECORD=0` to turn this off; in CI (`$CI` set) it is off unless
+`GOTIA_AUTO_RECORD=1`. Maps named with `-map` or `GOTIA_MAP` are never
+updated automatically.
 
 ## Recording
 
-`gotia record` checks HEAD out into a temporary worktree, builds each test
+`gotia record` (also what the background update runs) checks HEAD out into a temporary worktree, builds each test
 package with `-cover -coverpkg=<module>/...`, and runs every top-level test
 alone, in parallel. A test that fails while recording always runs when its
 package is affected.
