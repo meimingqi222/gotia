@@ -103,9 +103,9 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 			mapNote = fmt.Sprintf("the map is %s commits behind HEAD; `gotia record` keeps selection narrow", behind)
 		}
 	}
-	var files []string
+	var files, unseen []string
 	if len(paths) == 0 {
-		if files, err = m.changedFiles(commit); err != nil {
+		if files, unseen, err = m.changedFiles(commit); err != nil {
 			return nil, err
 		}
 	} else {
@@ -118,12 +118,15 @@ func makePlan(m *module, mapFile, base string, paths, ignore, goFlags []string) 
 		}
 	}
 	p := newPlanner(m, c, commit, ignore)
+	for _, rel := range unseen {
+		p.unseen(rel)
+	}
 	for _, rel := range files {
 		p.file(rel)
 	}
 	pl := p.finish(goFlagsRun)
 	pl.MapNote = mapNote
-	if len(files) == 0 {
+	if len(files)+len(unseen) == 0 {
 		pl.Effects = append(pl.Effects, fmt.Sprintf("no changes against %.7s", commit))
 	}
 	return pl, nil

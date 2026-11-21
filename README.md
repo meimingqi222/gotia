@@ -32,8 +32,10 @@ gotia: running 16 tests in 2 packages and 3 packages in full; 13 packages skippe
 - **It falls back to whole packages** when coverage cannot attribute a change:
   changed types, new or removed methods (interfaces), `init`, `//go:`
   directives and build constraints, side-effect imports, test helpers, test
-  data and embedded files. `go.mod`, `go.sum` and files outside every package
-  run everything. `*.md` and `.github/**` are ignored by default (`-ignore`).
+  data and embedded files. `go.mod`, `go.sum`, `go.work`, the modules of the
+  `go.work` in use, local `replace` directories and files outside every
+  package run everything; so does a `go.work` or `replace` directory outside
+  the repository, whose changes git cannot show. `*.md` and `.github/**` are ignored by default (`-ignore`).
 
 A stale map stays correct: gotia measures changes against the map's commit,
 so it only selects more as HEAD moves on. Re-record after pulling: with a

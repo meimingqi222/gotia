@@ -105,24 +105,134 @@ func (m *module) buildEnv() (map[string]string, error) {
 }
 
 // changedFiles lists module-relative files that differ from base, including
-// untracked ones. Files outside the module are not listed.
-func (m *module) changedFiles(base string) ([]string, error) {
-	var files []string
-	for _, args := range [][]string{
-		{"diff", "--name-only", "--no-renames", "--relative", "-z", base},
-		{"ls-files", "--others", "--exclude-standard", "-z"},
-	} {
+// untracked ones. It also lists the changed files of what the build reads
+// outside the module (see outside) as "../" paths, and returns as unseen
+// those outside the repository, whose changes git cannot show.
+func (m *module) changedFiles(base string) (files, unseen []string, err error) {
+	list := func(modDir string, args ...string) error {
 		out, err := output(m.root, "git", args...)
 		if err != nil {
-			return nil, fmt.Errorf("read changes (or pass paths): %w", err)
+			return fmt.Errorf("read changes (or pass paths): %w", err)
 		}
 		for _, name := range strings.Split(out, "\x00") {
-			if name != "" {
-				files = append(files, name)
+			if name == "" {
+				continue
 			}
+			if modDir != "" { // name is repository-relative
+				rel, err := filepath.Rel(filepath.FromSlash(modDir), filepath.FromSlash(name))
+				if err != nil {
+					return err
+				}
+				name = filepath.ToSlash(rel)
+			}
+			files = append(files, name)
+		}
+		return nil
+	}
+	if err := list("", "diff", "--name-only", "--no-renames", "--relative", "-z", base); err != nil {
+		return nil, nil, err
+	}
+	if err := list("", "ls-files", "--others", "--exclude-standard", "-z"); err != nil {
+		return nil, nil, err
+	}
+	outside, err := m.outside()
+	if err != nil || len(outside) == 0 {
+		return files, nil, err
+	}
+	prefix, err := output(m.root, "git", "rev-parse", "--show-prefix")
+	if err != nil {
+		return nil, nil, err
+	}
+	modDir := path.Clean("./" + prefix)
+	for _, rel := range outside {
+		top := path.Join(modDir, rel)
+		if top == ".." || strings.HasPrefix(top, "../") {
+			unseen = append(unseen, rel)
+			continue
+		}
+		if err := list(modDir, "diff", "--name-only", "--no-renames", "-z", base, "--", ":(top)"+top); err != nil {
+			return nil, nil, err
+		}
+		if err := list(modDir, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":(top)"+top); err != nil {
+			return nil, nil, err
 		}
 	}
-	return files, nil
+	return files, unseen, nil
+}
+
+// outside lists, as module-relative "../" paths, what the module's build
+// reads outside its directory: the go.work file in use and its modules, and
+// the directories of local replace directives.
+func (m *module) outside() ([]string, error) {
+	type replaces struct {
+		Replace []struct {
+			New struct{ Path, Version string }
+		}
+	}
+	root := realPath(m.root)
+	var paths []string
+	add := func(dir, p string) {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		rel, err := filepath.Rel(root, realPath(p))
+		if err != nil {
+			rel = ".." // another volume
+		}
+		if rel = filepath.ToSlash(rel); rel == ".." || strings.HasPrefix(rel, "../") {
+			paths = append(paths, rel)
+		}
+	}
+	addReplaces := func(dir string, args ...string) error {
+		out, err := output(m.root, "go", args...)
+		if err != nil {
+			return err
+		}
+		var r replaces
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			return err
+		}
+		for _, rep := range r.Replace {
+			if rep.New.Version == "" { // a directory, not a module version
+				add(dir, rep.New.Path)
+			}
+		}
+		return nil
+	}
+	if err := addReplaces(m.root, "mod", "edit", "-json"); err != nil {
+		return nil, err
+	}
+	work, err := output(m.root, "go", "env", "GOWORK")
+	if err != nil || work == "" || work == "off" {
+		return paths, err
+	}
+	dir := filepath.Dir(work)
+	add(dir, work)
+	add(dir, work+".sum")
+	out, err := output(m.root, "go", "work", "edit", "-json", work)
+	if err != nil {
+		return nil, err
+	}
+	var w struct{ Use []struct{ DiskPath string } }
+	if err := json.Unmarshal([]byte(out), &w); err != nil {
+		return nil, err
+	}
+	for _, u := range w.Use {
+		add(dir, u.DiskPath)
+	}
+	return paths, addReplaces(dir, "work", "edit", "-json", work)
+}
+
+// realPath resolves symbolic links in p, or in its directory when p does
+// not exist, so paths from git and the go command compare.
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return p
 }
 
 // fileAt reads a module-relative file at a commit; nil when it did not exist.

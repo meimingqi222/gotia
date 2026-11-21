@@ -93,8 +93,23 @@ func (p *planner) ignored(rel string) bool {
 	return false
 }
 
+// unseen marks a directory the build reads that git cannot show changes of.
+func (p *planner) unseen(rel string) {
+	p.all = true
+	p.effect("%s: read by the build but outside the repository, so its changes are unknown → every package", rel)
+}
+
 func (p *planner) file(rel string) {
 	m := p.m
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		if p.ignored(rel) {
+			p.effect("%s: ignored", rel)
+			return
+		}
+		p.all = true
+		p.effect("%s: outside the module, read through go.work or a replace → every package", rel)
+		return
+	}
 	if info, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(rel))); err == nil && info.IsDir() {
 		n := 0
 		for _, pkg := range m.packages {

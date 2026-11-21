@@ -191,3 +191,74 @@ func TestDiffIgnoresLayoutButNotStatements(t *testing.T) {
 		}
 	}
 }
+
+// TestChangesOutsideTheModule: a change the build reads through go.work or a
+// local replace runs every package; other files outside the module do not.
+func TestChangesOutsideTheModule(t *testing.T) {
+	other := map[string]string{
+		"go.mod": "module example.com/other\n\ngo 1.24\n",
+		"o.go":   "package other\n\nfunc O() int { return 1 }\n",
+	}
+	const main = "package mod\n\nimport \"example.com/other\"\n\nvar X = other.O()\n"
+	external := t.TempDir()
+	for _, tc := range []struct {
+		name      string
+		files     map[string]string
+		otherDir  string // where the other module is; "" for root/other
+		unchanged int    // packages run when only an unrelated file changed
+	}{
+		{name: "replace", files: map[string]string{
+			"mod/go.mod": "module example.com/mod\n\ngo 1.24\n\nrequire example.com/other v0.0.0\n\nreplace example.com/other => ../other\n",
+		}},
+		{name: "go.work", files: map[string]string{
+			"go.work":    "go 1.24\n\nuse (\n\t./mod\n\t./other\n)\n",
+			"mod/go.mod": "module example.com/mod\n\ngo 1.24\n",
+		}},
+		{name: "replace outside the repository", otherDir: external, unchanged: 1, files: map[string]string{
+			"mod/go.mod": "module example.com/mod\n\ngo 1.24\n\nrequire example.com/other v0.0.0\n\nreplace example.com/other => " + filepath.ToSlash(external) + "\n",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, write, git := newRepo(t)
+			write(tc.files)
+			write(map[string]string{"mod/mod.go": main, "unrelated/u.go": "package unrelated\n"})
+			otherDir := filepath.Join(root, "other")
+			if tc.otherDir != "" {
+				otherDir = tc.otherDir
+			}
+			for rel, text := range other {
+				if err := os.MkdirAll(otherDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(otherDir, rel), []byte(text), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			git("init", "-q")
+			git("add", ".")
+			git("commit", "-q", "-m", "one")
+			m, err := loadModule(filepath.Join(root, "mod"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := func() *plan {
+				t.Helper()
+				pl, err := makePlan(m, filepath.Join(t.TempDir(), "none.json"), "", nil, splitList(defaultIgnore), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return pl
+			}
+			write(map[string]string{"unrelated/u.go": "package unrelated\n\nfunc U() {}\n"})
+			if pl := plan(); len(pl.Whole) != tc.unchanged {
+				t.Errorf("an unrelated change ran %v (%v)", pl.Whole, pl.Effects)
+			}
+			if err := os.WriteFile(filepath.Join(otherDir, "o.go"), []byte("package other\n\nfunc O() int { return 2 }\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if pl := plan(); len(pl.Whole) != 1 {
+				t.Errorf("a change to the other module ran %v (%v)", pl.Whole, pl.Effects)
+			}
+		})
+	}
+}

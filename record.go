@@ -156,16 +156,19 @@ func (sc *scope) rerun(rel, name string) bool {
 // A test outside it ran only functions that did not change, so it still runs
 // the same functions. It returns nil and the reason when every test must run.
 func incrementalScope(wm *module, old *coverMap, ignore []string) (*scope, string) {
-	files, err := wm.changedFiles(old.Base)
+	files, unseen, err := wm.changedFiles(old.Base)
 	if err != nil {
 		return nil, err.Error()
 	}
 	p := newPlanner(wm, old, old.Base, ignore)
+	for _, rel := range unseen {
+		p.unseen(rel)
+	}
 	sc := &scope{whole: map[string]bool{}, tests: map[string]map[string]bool{}}
 	for _, rel := range files {
 		dir := path.Dir(rel)
 		current, err := os.ReadFile(filepath.Join(wm.root, filepath.FromSlash(rel)))
-		if errors.Is(err, os.ErrNotExist) && path.Ext(rel) == ".go" && wm.byDir[dir] == nil {
+		if errors.Is(err, os.ErrNotExist) && path.Ext(rel) == ".go" && wm.byDir[dir] == nil && !strings.HasPrefix(rel, "../") {
 			// The package is gone; its tests leave the map, and the packages
 			// that used it changed too.
 			p.effect("%s: its package was removed", rel)
